@@ -1,0 +1,33 @@
+# Core
+torch>=2.2.0
+torchvision>=0.17.0
+transformers>=4.40.0
+peft>=0.10.0
+trl>=0.8.6
+datasets>=2.18.0
+accelerate>=0.28.0
+bitsandbytes>=0.43.0
+
+# LangChain / Agent
+langchain>=0.2.0
+langchain-community>=0.2.0
+langgraph>=0.1.0
+langchain-huggingface>=0.0.3
+
+# RAG
+faiss-cpu>=1.8.0
+sentence-transformers>=2.7.0
+
+# Data
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+
+# App
+streamlit>=1.33.0
+plotly>=5.20.0
+
+# Utils
+python-dotenv>=1.0.0
+tqdm>=4.66.0
+pyyaml>=6.0.1
