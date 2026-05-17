@@ -12,10 +12,15 @@ import json
 import re
 from pathlib import Path
 from datetime import datetime
-from langchain_community.vectorstores import FAISS
+from langchain_qdrant import QdrantVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.tools import tool
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from qdrant_client import QdrantClient
+
+# ─── Qdrant 設定 ──────────────────────────────────────────────────
+COLLECTION_NAME = "semi_agent_knowledge"
+QDRANT_URL = "http://localhost:6333"
 
 # ─── 全域模型快取 ──────────────────────────────────────────────────
 _classifier = None
@@ -24,7 +29,7 @@ _vectorstore = None
 _embeddings = None
 
 
-# ─── 基礎載入函數（必須先定義，_eager_load 才能呼叫）─────────────
+# ─── 基礎載入函數 ─────────────────────────────────────────────────
 def _load_model_pipeline(model_dir: Path, max_new_tokens: int = 20):
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
     model = AutoModelForCausalLM.from_pretrained(
@@ -59,16 +64,24 @@ def get_embeddings():
 
 
 def get_vectorstore():
+    """連接 Qdrant，取得向量資料庫（只連接一次，後續走快取）"""
     global _vectorstore
     if _vectorstore is None:
-        vs_path = Path("data/vectorstore")
-        if not vs_path.exists():
-            raise FileNotFoundError("請先執行 python scripts/build_vectorstore.py")
-        _vectorstore = FAISS.load_local(
-            str(vs_path),
-            get_embeddings(),
-            allow_dangerous_deserialization=True,
+        client = QdrantClient(url=QDRANT_URL)
+
+        # 確認 collection 存在
+        if not client.collection_exists(COLLECTION_NAME):
+            raise FileNotFoundError(
+                f"Qdrant collection '{COLLECTION_NAME}' 不存在，"
+                "請先執行 python scripts/build_vectorstore.py"
+            )
+
+        _vectorstore = QdrantVectorStore(
+            client=client,
+            collection_name=COLLECTION_NAME,
+            embedding=get_embeddings(),
         )
+        print(f"✅ 已連接 Qdrant collection: {COLLECTION_NAME}")
     return _vectorstore
 
 
@@ -112,7 +125,10 @@ def rag_search(query: str) -> str:
         docs = vs.similarity_search(query, k=3)
         if not docs:
             return "知識庫中未找到相關資料。"
-        results = [f"【參考文件 {i+1}】\n{doc.page_content}" for i, doc in enumerate(docs)]
+        results = [
+            f"【參考文件 {i+1}】\n{doc.page_content}"
+            for i, doc in enumerate(docs)
+        ]
         return "\n\n".join(results)
     except FileNotFoundError as e:
         return f"[RAG 尚未初始化] {str(e)}"
@@ -253,18 +269,15 @@ ALL_TOOLS = [rag_search, classify_anomaly, generate_report]
 
 
 # ─── 模組載入時立即預載 ───────────────────────────────────────────
-# 放在檔案最底部，確保上面所有函數都已定義才呼叫
-# Python 保證同一進程內 module 只 import 一次
-# 所以這段只會執行一次，模型永久保留在 _classifier/_generator 全域變數
 def _eager_load():
     print("🚀 SemiAgent 模型預載開始...")
     get_classifier()
     get_generator()
     try:
         get_vectorstore()
-        print("✅ 向量庫載入完成")
+        print("✅ Qdrant 向量庫連接完成")
     except Exception as e:
-        print(f"⚠️ 向量庫載入失敗：{e}")
+        print(f"⚠️ 向量庫連接失敗：{e}")
     print("🎉 預載完成，後續請求直接使用記憶體快取")
 
 

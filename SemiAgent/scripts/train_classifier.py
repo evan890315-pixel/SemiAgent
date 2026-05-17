@@ -79,7 +79,7 @@ def main():
     )
 
     # ─── 載入模型 ────────────────────────────────────────────────
-    print(f"\n🤖 載入模型：{MODEL_NAME}")
+    print(f"\n 載入模型：{MODEL_NAME}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
