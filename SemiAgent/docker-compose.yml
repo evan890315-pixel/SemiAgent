@@ -1,6 +1,21 @@
 version: "3.9"
 
 services:
+  # ── Redis 記憶體資料庫 ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: semiagent_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]  # 開啟 AOF 持久化
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── Qdrant 向量資料庫 ─────────────────────────────────────────
   qdrant:
@@ -33,10 +48,13 @@ services:
       - ./data:/app/data
     environment:
       - QDRANT_URL=http://qdrant:6333   # 容器間用 service 名稱互連
+      - REDIS_URL=redis://redis:6379    # <-- 新增Redis連線環境變數
       - CUDA_VISIBLE_DEVICES=0
     depends_on:
       qdrant:
         condition: service_healthy       # 等 Qdrant 健康才啟動
+      redis:
+        condition:service_healthy        # 等 Redis 健康才啟動
     restart: unless-stopped
     # GPU 支援（需要 NVIDIA Container Toolkit）
     deploy:
@@ -49,3 +67,4 @@ services:
 
 volumes:
   qdrant_storage:   # 具名 volume，Docker 管理，重啟不消失
+  redis_data:      # Redis 資料持久化
