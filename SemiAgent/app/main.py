@@ -15,6 +15,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
 
+# agent 的 import 必須在 sys.path 設定完之後才能做
+import agent.tools.tools as _tools  # 觸發 eager load
+from agent.graph.graph import run_agent
+
 st.set_page_config(
     page_title="SemiAgent — 半導體製程異常分析",
     page_icon="⬡",
@@ -346,11 +350,19 @@ section[data-testid="stSidebar"][aria-expanded="false"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ─── 模型預載（import 時觸發，Python module 只 import 一次）────
-# tools.py 在第一次 import 時會自動載入所有模型到全域變數
-# Python 的 import 機制保證同一進程內 module 只載入一次
-# Streamlit 重新執行 script 不會重新 import，全域模型變數保留在記憶體
-import agent.tools.tools as _tools  # 觸發 eager load
+# ─── 模型和 Agent 預載（cache_resource 確保只初始化一次）─────────
+@st.cache_resource
+def init_agent():
+    import agent.tools.tools as _tools  # 觸發 eager load
+    from agent.graph.graph import run_agent
+    # 預熱 RAG
+    try:
+        _tools.get_vectorstore()  # → 連接 Qdrant，預熱
+    except Exception:
+        pass
+    return run_agent
+
+run_agent = init_agent()
 
 # ─── 狀態偵測 ─────────────────────────────────────────────────────
 rag_ready = Path("data/vectorstore").exists()
@@ -494,7 +506,7 @@ with col_right:
 
             with st.spinner("Agent 分析中，請稍候..."):
                 try:
-                    from agent.graph.graph import run_agent
+                    # from agent.graph.graph import run_agent
                     t0 = time.time()
                     result = run_agent(full_input)
                     elapsed = time.time() - t0
