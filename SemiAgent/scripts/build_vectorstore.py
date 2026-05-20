@@ -17,7 +17,7 @@ from qdrant_client.models import Distance, VectorParams
 # ─── 設定 ─────────────────────────────────────────────────────────
 COLLECTION_NAME = "semi_agent_knowledge"
 EMBEDDING_DIM = 384  # paraphrase-multilingual-MiniLM-L12-v2 的輸出維度
-QDRANT_URL = "http://localhost:6333"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
 
 def build_vectorstore():

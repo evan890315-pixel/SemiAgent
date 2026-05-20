@@ -75,7 +75,7 @@ SemiAgent/
 ├── data/
 │   ├── raw/                  # 原始資料
 │   ├── processed/            # 處理後資料集（訓練用）
-│   └── vectorstore/          # FAISS 向量索引
+│   └── vectorstore/          # Qdrant 向量索引 //原為FAISS
 ├── models/
 │   ├── classifier/           # 分類模型 checkpoint
 │   └── generator/            # 生成模型 checkpoint

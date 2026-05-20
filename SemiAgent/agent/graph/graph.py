@@ -111,33 +111,22 @@ def report_node(state: AgentState) -> AgentState:
 # ─── 建立 StateGraph ──────────────────────────────────────────────
 def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
-
-    # 加入節點
     graph.add_node("classify", classify_node)
     graph.add_node("rag", rag_node)
     graph.add_node("report", report_node)
-
-    # 定義邊（線性流程）
     graph.add_edge(START, "classify")
     graph.add_edge("classify", "rag")
     graph.add_edge("rag", "report")
     graph.add_edge("report", END)
-
     return graph.compile()
 
 
-# ─── 執行入口 ─────────────────────────────────────────────────────
+# 加這行，模組載入時只 compile 一次
+_COMPILED_GRAPH = build_graph()
+
+
 def run_agent(user_input: str) -> AgentState:
-    """
-    執行 SemiAgent 完整分析流程。
-
-    Args:
-        user_input: 製程異常描述（自然語言）
-
-    Returns:
-        最終 AgentState，包含分類結果、RAG 參考、分析報告
-    """
-    app = build_graph()
+    # ← 改成用快取的 graph，不再每次重新 build
     initial_state = AgentState(
         user_input=user_input,
         anomaly_classification={},
@@ -146,7 +135,7 @@ def run_agent(user_input: str) -> AgentState:
         steps_completed=[],
         error="",
     )
-    result = app.invoke(initial_state)
+    result = _COMPILED_GRAPH.invoke(initial_state)
     return result
 
 

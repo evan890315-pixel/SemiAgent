@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "semi-agent-rag": {
+      "command": "python",
+      "args": ["mcp_servers/server_rag.py"],
+      "description": "半導體知識庫 RAG 查詢（真實 Qdrant）"
+    },
+    "semi-agent-classifier": {
+      "command": "python",
+      "args": ["mcp_servers/server_classifier.py"],
+      "description": "異常分類器（真實 fine-tuned Gemma-3-4B）"
+    },
+    "semi-agent-equipment": {
+      "command": "python",
+      "args": ["mcp_servers/server_equipment.py"],
+      "description": "設備資料庫（Mock 感測器數據）"
+    },
+    "semi-agent-erp": {
+      "command": "python",
+      "args": ["mcp_servers/server_erp.py"],
+      "description": "ERP 系統（Mock 批次查詢、工單建立）"
+    },
+    "semi-agent-email": {
+      "command": "python",
+      "args": ["mcp_servers/server_email.py"],
+      "description": "郵件通報系統（Mock）"
+    }
+  }
+}

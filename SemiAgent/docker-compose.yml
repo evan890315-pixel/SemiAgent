@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+
+  # ── Qdrant 向量資料庫 ─────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: semiagent_qdrant
+    ports:
+      - "6333:6333"   # REST API + Dashboard
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage   # 資料持久化
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── SemiAgent Streamlit 應用 ──────────────────────────────────
+  semiagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: semiagent_app
+    ports:
+      - "8501:8501"
+    volumes:
+      # 模型檔案太大（幾GB），掛載本機資料夾，不打包進 image
+      - ./models:/app/models
+      # 資料集也掛載，方便更新
+      - ./data:/app/data
+    environment:
+      - QDRANT_URL=http://qdrant:6333   # 容器間用 service 名稱互連
+      - CUDA_VISIBLE_DEVICES=0
+    depends_on:
+      qdrant:
+        condition: service_healthy       # 等 Qdrant 健康才啟動
+    restart: unless-stopped
+    # GPU 支援（需要 NVIDIA Container Toolkit）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  qdrant_storage:   # 具名 volume，Docker 管理，重啟不消失

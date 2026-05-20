@@ -6,7 +6,7 @@ LangGraph Agent 的三個核心工具：
 2. 異常分類工具（呼叫 fine-tuned 分類器）
 3. 報告生成工具（呼叫 fine-tuned 生成器）
 """
-
+import os
 import torch
 import json
 import re
@@ -20,7 +20,7 @@ from qdrant_client import QdrantClient
 
 # ─── Qdrant 設定 ──────────────────────────────────────────────────
 COLLECTION_NAME = "semi_agent_knowledge"
-QDRANT_URL = "http://localhost:6333"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
 # ─── 全域模型快取 ──────────────────────────────────────────────────
 _classifier = None

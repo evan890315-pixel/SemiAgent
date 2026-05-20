@@ -1,0 +1,46 @@
+# 模型檔案太大，透過 volume 掛載
+models/
+
+# 資料集，透過 volume 掛載
+data/
+
+# Qdrant 本地 storage
+qdrant_storage/
+
+# Python 快取
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# Jupyter
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# Git
+.git/
+.gitignore
+
+# 開發工具
+.vscode/
+.idea/
+
+# 文件
+docs/
+*.md
+README*
+
+# HuggingFace 快取
+.cache/
+
+# Windows
+Thumbs.db
+Desktop.ini

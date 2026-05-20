@@ -14,8 +14,9 @@ langchain-community>=0.2.0
 langgraph>=0.1.0
 langchain-huggingface>=0.0.3
 
-# RAG
-faiss-cpu>=1.8.0
+# RAG（Qdrant 取代原本的 FAISS）
+qdrant-client>=1.9.0
+langchain-qdrant>=0.1.0
 sentence-transformers>=2.7.0
 
 # Data
