@@ -7,7 +7,7 @@ FROM nvidia/cuda:12.9.0-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
-ENV REDIS_URL=redis://redis:6379   # 預設 Redis 連線字串（可被 docker-compose.yml 覆蓋）
+ENV REDIS_URL=redis://redis:6379   
 
 # 安裝系統依賴
 RUN apt-get update && apt-get install -y \
