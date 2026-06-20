@@ -100,13 +100,14 @@ def _eager_load():
             module = _get_server(server)
             # 觸發 server_classifier 的模型載入
             if server == "server_classifier":
-                module.get_classifier()
-                module.get_generator() if hasattr(module, 'get_generator') else None
-            print(f"   ✅ {server} 就緒")
+                try:
+                    import requests
+                    r = requests.get("http://localhost:8000/health", timeout=5)
+                    if r.status_code == 200:
+                        print("   ✅ vLLM Docker API 可用")
+                    else:
+                        print("   ⚠️ vLLM Docker API 異常")
+                except Exception:
+                    print("   ⚠️ vLLM Docker 未啟動，將使用 Mock 模式")
         except Exception as e:
-            print(f"   ⚠️ {server}：{e}")
-
-try:
-    _eager_load()
-except Exception as e:
-    print(f"⚠️ 預載失敗：{e}")
+            print(f"⚠️ 預載失敗：{e}")
