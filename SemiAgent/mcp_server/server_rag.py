@@ -3,11 +3,22 @@ mcp_servers/server_rag.py
 
 MCP Server 1：半導體知識庫 RAG 查詢
 連接真實 Qdrant 向量資料庫
+
+工具列表：
+  rag_search          → 語意向量搜尋
+  rag_search_by_type  → 依缺陷類型過濾後語意搜尋
+  rag_hybrid_search   → Hybrid Search（向量 + BM25 關鍵字，RRF 融合）
+                        解決零件編號 / 專有名詞精確匹配問題
+  add_document        → 解析文件並加入知識庫
+  list_documents      → 列出知識庫文件
+  delete_document     → 刪除文件
 """
 
 import os
+import json
 import asyncio
 import torch
+from pathlib import Path
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -100,7 +111,41 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["query", "defect_type"]
             }
-        )
+        ),
+        Tool(
+            name = "add_document",
+            description = "解析PDF文件或圖片並加入知識庫",
+            inputSchema = {
+                "type": "object",
+                "properties": {
+                    "file_path":  {"type": "string", "description": "文件絕對路徑"},
+                    "use_vision": {"type": "boolean", "default": False,
+                                  "description": "是否用 Gemini Vision 描述圖片"},
+                },
+                "required": ["file_path"]
+            }
+        ),
+        Tool(
+            name = "list_documents",
+            description = "列出知識庫中所有文件",
+            inputSchema = {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "文件名稱"},
+                }
+            }
+        ),
+        Tool(
+            name="delete_document",
+            description="從知識庫刪除指定文件的所有 chunk。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "文件名稱"}
+                },
+                "required": ["source"]
+            }
+        ),
     ]
 
 
@@ -114,11 +159,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             docs = vs.similarity_search(query, k=k)
             if not docs:
                 return [TextContent(type="text", text="知識庫中未找到相關資料。")]
-            results = [
-                f"【參考文件 {i+1}】\n{doc.page_content}"
+            # 回傳 JSON 格式，帶有 filename metadata 供 server_classifier 組 rag_chunks
+            chunks = [
+                {
+                    "filename": doc.metadata.get("source", f"chunk_{i+1}.md"),
+                    "content":  doc.page_content,
+                }
                 for i, doc in enumerate(docs)
             ]
-            return [TextContent(type="text", text="\n\n".join(results))]
+            return [TextContent(type="text", text=json.dumps(chunks, ensure_ascii=False))]
         except Exception as e:
             return [TextContent(type="text", text=f"[RAG 查詢錯誤] {str(e)}")]
 
@@ -151,7 +200,118 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except Exception as e:
             return [TextContent(type="text", text=f"[RAG 查詢錯誤] {str(e)}")]
 
+     # ── 新增工具 3：add_document ──────────────────────────────────
+    elif name == "add_document":
+        file_path  = arguments.get("file_path", "")
+        use_vision = arguments.get("use_vision", False)
+ 
+        if not Path(file_path).exists():
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error":   f"找不到檔案：{file_path}"
+            }, ensure_ascii=False))]
+ 
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).parents[1]))
+            from scripts.parse_document import parse_document
+            from langchain_core.documents import Document
+ 
+            # 解析文件
+            chunks = parse_document(file_path, use_vision=use_vision)
+            if not chunks:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False, "error": "文件解析失敗"
+                }, ensure_ascii=False))]
+ 
+            # 轉成 LangChain Document 格式，用原版的 vectorstore 存入
+            vs   = get_vectorstore()
+            docs = [
+                Document(
+                    page_content=c["text"],
+                    metadata=c["metadata"]
+                )
+                for c in chunks
+            ]
+            vs.add_documents(docs)
+ 
+            return [TextContent(type="text", text=json.dumps({
+                "success":      True,
+                "source":       Path(file_path).name,
+                "chunks_added": len(chunks),
+                "message":      f"✅ 成功加入 {len(chunks)} 個 chunk",
+            }, ensure_ascii=False, indent=2))]
+ 
+        except Exception as e:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False, "error": str(e)
+            }, ensure_ascii=False))]
+ 
+    # ── 新增工具 4：list_documents ────────────────────────────────
+    elif name == "list_documents":
+
+        try:
+            client  = QdrantClient(url=QDRANT_URL)
+            results = client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            doc_stats = {}
+            for point in results[0]:
+                payload = point.payload or {}
+                # LangChain 存的 metadata 在 payload["metadata"] 裡
+                meta   = payload.get("metadata", {})
+                source = meta.get("source", payload.get("source", "未知"))
+                dtype  = meta.get("type",   payload.get("type",   "unknown"))
+                if source not in doc_stats:
+                    doc_stats[source] = {"count": 0, "type": dtype}
+                doc_stats[source]["count"] += 1
+ 
+            docs = [
+                {"source": k, "type": v["type"], "chunks": v["count"]}
+                for k, v in doc_stats.items()
+            ]
+            return [TextContent(type="text", text=json.dumps({
+                "total_documents": len(docs),
+                "total_chunks":    sum(d["chunks"] for d in docs),
+                "documents":       docs,
+            }, ensure_ascii=False, indent=2))]
+ 
+        except Exception as e:
+            return [TextContent(type="text", text=json.dumps(
+                {"error": str(e)}, ensure_ascii=False))]
+ 
+    # ── 新增工具 5：delete_document ───────────────────────────────
+    elif name == "delete_document":
+        source = arguments.get("source", "")
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            client = QdrantClient(url=QDRANT_URL)
+ 
+            # LangChain 的 metadata 存在 payload.metadata.source
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=Filter(must=[
+                    FieldCondition(
+                        key="metadata.source",
+                        match=MatchValue(value=source)
+                    )
+                ])
+            )
+            return [TextContent(type="text", text=json.dumps({
+                "success": True,
+                "message": f"✅ 已刪除 {source} 的所有 chunk",
+            }, ensure_ascii=False))]
+ 
+        except Exception as e:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False, "error": str(e)
+            }, ensure_ascii=False))]
+ 
     return [TextContent(type="text", text=f"未知工具：{name}")]
+
 
 
 async def main():

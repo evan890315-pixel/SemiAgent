@@ -1,2 +1,0 @@
-FROM vllm/vllm-openai:v0.22.1
-RUN pip install "bitsandbytes>=0.49.2" --upgrade

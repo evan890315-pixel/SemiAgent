@@ -1,18 +1,15 @@
 """
-agent/graph/graph.py
+agent/graph/graph.py  (更新版 — 加入 vision_node)
 
-異常分析模式 Graph（原 graph.py 升級版）
-完整流程：classify → rag → report → erp → email
-支援 Redis 持久化記憶（記得分析過的批次）
-
-使用方式：
-  from agent.graph.graph_analysis import run_analysis
-  result = run_analysis(user_input, lot_id="LOT0042", thread_id="engineer_001")
+異常分析模式 Graph
+流程：
+  有圖片：vision → rag → report → [erp → email]
+  無圖片：classify → rag → report → [erp → email]
 """
 
 import os
 import json
-from typing import TypedDict
+from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, START, END
 
 import sys
@@ -23,14 +20,12 @@ from agent.tools.tools import (
     create_work_order, send_notification,
 )
 
-# ─── Redis Checkpointer ───────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 
 def get_redis_checkpointer():
     try:
         from langgraph.checkpoint.redis import RedisSaver
-        # 直接傳連線字串，不是 Redis 物件
         saver = RedisSaver(REDIS_URL)
         saver.setup()
         return saver
@@ -40,10 +35,11 @@ def get_redis_checkpointer():
         return MemorySaver()
 
 
-# ─── 狀態定義 ─────────────────────────────────────────────────────
+# ─── 狀態定義（加入 image_path）──────────────────────────────────
 class AnalysisState(TypedDict):
     user_input:             str
     lot_id:                 str
+    image_path:             Optional[str]   # 新增：圖片路徑（None 表示純文字模式）
     anomaly_classification: dict
     rag_results:            str
     final_report:           str
@@ -51,11 +47,46 @@ class AnalysisState(TypedDict):
     notification:           dict
     steps_completed:        list
     error:                  str
-    # 記憶相關：記錄歷史分析批次
     analysis_history:       list
 
 
-# ─── Node 1：異常分類 ─────────────────────────────────────────────
+# ─── Node 0：視覺分析（新增）────────────────────────────────────
+def vision_node(state: AnalysisState) -> AnalysisState:
+    """用 ResNet18 分析晶圓圖片，取得 anomaly_type"""
+    print("🖼️  [Step 0] 視覺分析（MCP → server_vision）...")
+    from mcp_server.mcp_client import call_mcp_tool
+    try:
+        result_str = call_mcp_tool(
+            "server_vision",
+            "analyze_wafer_image",
+            {"image_path": state["image_path"]}
+        )
+        result = json.loads(result_str)
+        print(f"   視覺分類：{result.get('anomaly_name_zh')} "
+              f"({result.get('anomaly_type')}) "
+              f"信心：{result.get('confidence_pct')}")
+
+        # 把視覺結果轉成和 classify_node 一樣的格式
+        clf_result = {
+            "anomaly_type":    result.get("anomaly_type", "normal"),
+            "anomaly_name_zh": result.get("anomaly_name_zh", "正常"),
+            "confidence":      f"{result.get('confidence_pct', '—')}（視覺模型）",
+            "vision_scores":   result.get("all_scores", {}),
+        }
+        return {
+            **state,
+            "anomaly_classification": clf_result,
+            "steps_completed": state.get("steps_completed", []) + ["vision"],
+        }
+    except Exception as e:
+        print(f"   ⚠️ 視覺分析失敗：{e}，改用文字分類")
+        return {
+            **state,
+            "steps_completed": state.get("steps_completed", []) + ["vision_failed"],
+        }
+
+
+# ─── Node 1：文字分類 ─────────────────────────────────────────────
 def classify_node(state: AnalysisState) -> AnalysisState:
     print("🔍 [Step 1/5] 執行異常分類（MCP → server_classifier）...")
     try:
@@ -109,7 +140,6 @@ def report_node(state: AnalysisState) -> AnalysisState:
         report = generate_report.invoke({"input_json": input_data})
         print("   報告生成完成 ✅")
 
-        # 把這次分析記入歷史
         from datetime import datetime
         history_entry = {
             "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -117,15 +147,15 @@ def report_node(state: AnalysisState) -> AnalysisState:
             "anomaly_type": state["anomaly_classification"].get("anomaly_type"),
             "anomaly_name": state["anomaly_classification"].get("anomaly_name_zh"),
             "description":  state["user_input"][:100],
+            "has_image":    bool(state.get("image_path")),
         }
-        history = state.get("analysis_history", [])
-        history = (history + [history_entry])[-20:]  # 最多保留 20 筆
+        history = (state.get("analysis_history", []) + [history_entry])[-20:]
 
         return {
             **state,
-            "final_report":    report,
+            "final_report":     report,
             "analysis_history": history,
-            "steps_completed": state.get("steps_completed", []) + ["report"],
+            "steps_completed":  state.get("steps_completed", []) + ["report"],
         }
     except Exception as e:
         return {
@@ -135,14 +165,13 @@ def report_node(state: AnalysisState) -> AnalysisState:
         }
 
 
-# ─── Node 4：ERP 工單 ─────────────────────────────────────────────
+# ─── Node 4：ERP ──────────────────────────────────────────────────
 def erp_node(state: AnalysisState) -> AnalysisState:
     print("🏭 [Step 4/5] 建立 ERP 工單（MCP → server_erp）...")
     anomaly_type = state["anomaly_classification"].get("anomaly_type", "normal")
     severity_map = {
         "crack": "critical", "particle": "high",
-        "void":  "medium",   "scratch":  "medium",
-        "normal": "low",
+        "void":  "medium",   "scratch":  "medium", "normal": "low",
     }
     input_data = json.dumps({
         "lot_id":       state.get("lot_id", "UNKNOWN"),
@@ -154,27 +183,20 @@ def erp_node(state: AnalysisState) -> AnalysisState:
         result_str = create_work_order.invoke({"input_json": input_data})
         result     = json.loads(result_str) if result_str.startswith("{") else {"raw": result_str}
         print(f"   工單建立：{result.get('message', '')}")
-        return {
-            **state,
-            "work_order": result,
-            "steps_completed": state.get("steps_completed", []) + ["erp"],
-        }
+        return {**state, "work_order": result,
+                "steps_completed": state.get("steps_completed", []) + ["erp"]}
     except Exception as e:
-        return {
-            **state,
-            "work_order": {"error": str(e)},
-            "steps_completed": state.get("steps_completed", []) + ["erp_failed"],
-        }
+        return {**state, "work_order": {"error": str(e)},
+                "steps_completed": state.get("steps_completed", []) + ["erp_failed"]}
 
 
-# ─── Node 5：郵件通報 ─────────────────────────────────────────────
+# ─── Node 5：郵件 ─────────────────────────────────────────────────
 def email_node(state: AnalysisState) -> AnalysisState:
     print("📧 [Step 5/5] 發送郵件通報（MCP → server_email）...")
     anomaly_type = state["anomaly_classification"].get("anomaly_type", "normal")
     severity_map = {
         "crack": "critical", "particle": "high",
-        "void":  "medium",   "scratch":  "medium",
-        "normal": "low",
+        "void":  "medium",   "scratch":  "medium", "normal": "low",
     }
     input_data = json.dumps({
         "anomaly_type": anomaly_type,
@@ -187,20 +209,21 @@ def email_node(state: AnalysisState) -> AnalysisState:
         result_str = send_notification.invoke({"input_json": input_data})
         result     = json.loads(result_str) if result_str.startswith("{") else {"raw": result_str}
         print(f"   通報完成：{result.get('message', '')}")
-        return {
-            **state,
-            "notification": result,
-            "steps_completed": state.get("steps_completed", []) + ["email"],
-        }
+        return {**state, "notification": result,
+                "steps_completed": state.get("steps_completed", []) + ["email"]}
     except Exception as e:
-        return {
-            **state,
-            "notification": {"error": str(e)},
-            "steps_completed": state.get("steps_completed", []) + ["email_failed"],
-        }
+        return {**state, "notification": {"error": str(e)},
+                "steps_completed": state.get("steps_completed", []) + ["email_failed"]}
 
 
-# ─── 條件分支 ─────────────────────────────────────────────────────
+# ─── 條件路由 ─────────────────────────────────────────────────────
+def route_input(state: AnalysisState) -> str:
+    """有圖片 → vision_node；無圖片 → classify_node"""
+    if state.get("image_path"):
+        return "vision"
+    return "classify"
+
+
 def should_notify(state: AnalysisState) -> str:
     anomaly_type = state["anomaly_classification"].get("anomaly_type", "unknown")
     if anomaly_type == "normal":
@@ -212,15 +235,26 @@ def should_notify(state: AnalysisState) -> str:
 # ─── 建立 Graph ───────────────────────────────────────────────────
 def build_analysis_graph():
     graph = StateGraph(AnalysisState)
+
+    graph.add_node("vision",   vision_node)
     graph.add_node("classify", classify_node)
     graph.add_node("rag",      rag_node)
     graph.add_node("report",   report_node)
     graph.add_node("erp",      erp_node)
     graph.add_node("email",    email_node)
 
-    graph.add_edge(START,      "classify")
+    # START → 根據有無圖片決定走哪條路
+    graph.add_conditional_edges(
+        START,
+        route_input,
+        {"vision": "vision", "classify": "classify"}
+    )
+
+    # vision 和 classify 都接到 rag
+    graph.add_edge("vision",   "rag")
     graph.add_edge("classify", "rag")
-    graph.add_edge("rag",      "report")
+
+    graph.add_edge("rag", "report")
     graph.add_conditional_edges(
         "report",
         should_notify,
@@ -228,38 +262,30 @@ def build_analysis_graph():
     )
     graph.add_edge("erp",   "email")
     graph.add_edge("email", END)
+
     return graph
 
 
-# ─── 模組層級：只初始化一次 ──────────────────────────────────────
+# ─── 模組層級初始化 ───────────────────────────────────────────────
 _checkpointer   = get_redis_checkpointer()
 _COMPILED_GRAPH = build_analysis_graph().compile(checkpointer=_checkpointer)
 
 
-# ─── 執行入口 ─────────────────────────────────────────────────────
 def run_analysis(user_input: str,
-                 lot_id: str    = "UNKNOWN",
-                 thread_id: str = "default") -> AnalysisState:
-    """
-    執行異常分析完整流程
-
-    Args:
-        user_input: 異常描述
-        lot_id:     批次編號
-        thread_id:  工程師 ID（同一個 ID 有歷史記憶）
-    """
+                 lot_id:     str = "UNKNOWN",
+                 thread_id:  str = "default",
+                 image_path: str = None) -> AnalysisState:
     config = {"configurable": {"thread_id": f"analysis_{thread_id}"}}
-
-    # 取得歷史狀態（如果有的話）
     try:
-        prev_state    = _COMPILED_GRAPH.get_state(config)
-        prev_history  = prev_state.values.get("analysis_history", []) if prev_state.values else []
+        prev_state   = _COMPILED_GRAPH.get_state(config)
+        prev_history = prev_state.values.get("analysis_history", []) if prev_state.values else []
     except Exception:
-        prev_history  = []
+        prev_history = []
 
     initial_state = AnalysisState(
         user_input             = user_input,
         lot_id                 = lot_id,
+        image_path             = image_path,      # 新增
         anomaly_classification = {},
         rag_results            = "",
         final_report           = "",
@@ -269,29 +295,13 @@ def run_analysis(user_input: str,
         error                  = "",
         analysis_history       = prev_history,
     )
-
-    result = _COMPILED_GRAPH.invoke(initial_state, config=config)
-    return result
+    return _COMPILED_GRAPH.invoke(initial_state, config=config)
 
 
 def get_analysis_history(thread_id: str) -> list:
-    """取得工程師的歷史分析記錄"""
     config = {"configurable": {"thread_id": f"analysis_{thread_id}"}}
     try:
         state = _COMPILED_GRAPH.get_state(config)
         return state.values.get("analysis_history", []) if state.values else []
     except Exception:
         return []
-
-
-if __name__ == "__main__":
-    print("=== 異常分析模式測試 ===")
-    result = run_analysis(
-        "晶圓表面粒子計數 320 個，超出規格上限 100 個，良率 65%",
-        lot_id="LOT0042",
-        thread_id="engineer_001"
-    )
-    print(f"\n分類：{result['anomaly_classification']}")
-    print(f"步驟：{result['steps_completed']}")
-    print(f"報告：{result['final_report'][:200]}...")
-    print(f"歷史：{result['analysis_history']}")

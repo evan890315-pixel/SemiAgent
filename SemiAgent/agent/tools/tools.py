@@ -79,9 +79,9 @@ def rag_search(query: str) -> str:
     """查詢半導體製程異常知識庫，返回相關 SOP 與處理指引。"""
     result = call_mcp_tool("server_rag", "rag_search", {"query": query, "k": 3})
 
-    # MCP 失敗時備援直連 Qdrant
-    if result.startswith("[MCP 呼叫錯誤]"):
-        print(f"⚠️ RAG MCP 失敗，走備援：{result}")
+    # MCP 失敗 或 RAG 查詢錯誤（如 Qdrant 維度不符）時備援直連
+    if result.startswith("[MCP 呼叫錯誤]") or result.startswith("[RAG 查詢錯誤]"):
+        print(f"⚠️ RAG 失敗，走備援：{result}")
         try:
             import torch
             from langchain_qdrant import QdrantVectorStore
@@ -99,9 +99,16 @@ def rag_search(query: str) -> str:
                 collection_name="semi_agent_knowledge",
                 embedding=embeddings,
             )
-            docs    = vs.similarity_search(query, k=3)
-            results = [f"【參考文件 {i+1}】\n{doc.page_content}" for i, doc in enumerate(docs)]
-            return "\n\n".join(results)
+            docs = vs.similarity_search(query, k=3)
+            # 與 server_rag 回傳格式一致：JSON chunks
+            chunks = [
+                {
+                    "filename": doc.metadata.get("source", f"chunk_{i+1}.md"),
+                    "content":  doc.page_content,
+                }
+                for i, doc in enumerate(docs)
+            ]
+            return json.dumps(chunks, ensure_ascii=False)
         except Exception as e:
             return f"[RAG 查詢失敗] {str(e)}"
 
@@ -141,6 +148,16 @@ def generate_report(input_json: str) -> str:
     except Exception:
         return "❌ 輸入格式錯誤"
 
+    # rag_context 可能是 server_rag 回傳的 JSON chunks 字串
+    # 解析成結構化 list，讓 server_classifier 能取出 filename
+    rag_chunks = []
+    try:
+        parsed = json.loads(rag_context)
+        if isinstance(parsed, list) and parsed and "filename" in parsed[0]:
+            rag_chunks = parsed
+    except (json.JSONDecodeError, TypeError, IndexError):
+        pass  # 純文字 fallback，保留 rag_context 給 backward compat
+
     # 透過 MCP 呼叫 server_classifier 的生成器
     result = call_mcp_tool(
         "server_classifier",
@@ -148,7 +165,8 @@ def generate_report(input_json: str) -> str:
         {
             "anomaly_type": anomaly_type,
             "description":  description,
-            "rag_context":  rag_context,
+            "rag_chunks":   rag_chunks,    # 結構化 chunks（含 filename）
+            "rag_context":  rag_context,   # 向後相容備援
         }
     )
 
