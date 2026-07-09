@@ -99,14 +99,15 @@ def rag_search(query: str) -> str:
                 collection_name="semi_agent_knowledge",
                 embedding=embeddings,
             )
-            docs = vs.similarity_search(query, k=3)
+            docs_with_scores = vs.similarity_search_with_score(query, k=3)
             # 與 server_rag 回傳格式一致：JSON chunks
             chunks = [
                 {
                     "filename": doc.metadata.get("source", f"chunk_{i+1}.md"),
                     "content":  doc.page_content,
+                    "score":    round(float(score), 4),
                 }
-                for i, doc in enumerate(docs)
+                for i, (doc, score) in enumerate(docs_with_scores)
             ]
             return json.dumps(chunks, ensure_ascii=False)
         except Exception as e:
@@ -145,19 +146,18 @@ def generate_report(input_json: str) -> str:
         anomaly_type = data.get("anomaly_type", "normal")
         description  = data.get("description", "")
         rag_context  = data.get("rag_context", "")
+        rag_chunks   = data.get("rag_chunks", []) or []   # ← v4.1:優先讀結構化欄位
     except Exception:
         return "❌ 輸入格式錯誤"
 
-    # rag_context 可能是 server_rag 回傳的 JSON chunks 字串
-    # 解析成結構化 list，讓 server_classifier 能取出 filename
-    rag_chunks = []
-    try:
-        parsed = json.loads(rag_context)
-        if isinstance(parsed, list) and parsed and "filename" in parsed[0]:
-            rag_chunks = parsed
-    except (json.JSONDecodeError, TypeError, IndexError):
-        pass  # 純文字 fallback，保留 rag_context 給 backward compat
-
+    # 向後相容:沒有 rag_chunks 時,才嘗試從 rag_context 字串反解
+    if not rag_chunks and rag_context:
+        try:
+            parsed = json.loads(rag_context)
+            if isinstance(parsed, list) and parsed and "filename" in parsed[0]:
+                rag_chunks = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass  # 純文字 fallback,rag_context 原樣傳下去
     # 透過 MCP 呼叫 server_classifier 的生成器
     result = call_mcp_tool(
         "server_classifier",

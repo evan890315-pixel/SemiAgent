@@ -25,6 +25,7 @@ from mcp.types import Tool, TextContent
 from langchain_qdrant import QdrantVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 # ─── 設定 ─────────────────────────────────────────────────────────
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -33,6 +34,59 @@ COLLECTION_NAME = "semi_agent_knowledge"
 # ─── 全域快取 ──────────────────────────────────────────────────────
 _vectorstore = None
 _embeddings = None
+
+# ─── Cross-Encoder Reranker (Block A) ────────────────────────────
+# 模型 ~1.1 GB,常駐 CPU RAM,不佔 VRAM;10 對精排約 1~2 秒
+# ⚠️ 分數為 sigmoid(logit) ∈ (0,1),分佈與餘弦相似度完全不同
+#    RERANKER_THRESHOLD 與 react_agent.py 的 RETRIEVAL_SCORE_THRESHOLD
+#    都必須用基準案例重新校準後才上線
+RERANKER_MODEL_NAME = "BAAI/bge-reranker-base"
+RERANKER_THRESHOLD  = 0.4   # 初始值;一般問答命中 SOP 約 0.05~0.15 → 被過濾
+
+_reranker_tokenizer = None
+_reranker_model     = None
+
+
+def get_reranker():
+    global _reranker_tokenizer, _reranker_model
+    if _reranker_model is None:
+        _reranker_tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL_NAME)
+        _reranker_model = AutoModelForSequenceClassification.from_pretrained(
+            RERANKER_MODEL_NAME
+        )
+        _reranker_model.eval()
+    return _reranker_tokenizer, _reranker_model
+
+
+def rerank(query: str, docs_with_scores: list, top_k: int = 3) -> list:
+    """Cross-encoder 精排。
+    回傳 [(doc, sigmoid_score), ...] 降序。
+    全部低於 RERANKER_THRESHOLD 時回傳空列表(視為無相關 SOP,讓下游走一般回答)。
+    """
+    if not docs_with_scores:
+        return []
+    tokenizer, model = get_reranker()
+    pairs = [[query, doc.page_content] for doc, _ in docs_with_scores]
+    with torch.no_grad():
+        inputs = tokenizer(
+            pairs, padding=True, truncation=True,
+            max_length=512, return_tensors="pt"
+        )
+        logits = model(**inputs).logits.squeeze(-1)
+        if logits.dim() == 0:       # 單一 pair 邊界情況
+            logits = logits.unsqueeze(0)
+        scores = torch.sigmoid(logits).tolist()
+
+    ranked = sorted(
+        zip(scores, [doc for doc, _ in docs_with_scores]),
+        key=lambda x: x[0], reverse=True
+    )
+    
+    top = ranked[:top_k]
+    # if top[0][0] < RERANKER_THRESHOLD:
+    #     return []   # 最高分低於門檻 → 無相關 SOP chunk
+    
+    return [(doc, score) for score, doc in top]
 
 
 def get_embeddings():
@@ -156,17 +210,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         k = arguments.get("k", 3)
         try:
             vs = get_vectorstore()
-            docs = vs.similarity_search(query, k=k)
-            if not docs:
+            # Block B:兩階段檢索
+            # 階段一:bi-encoder 粗召回 top-10(快,但分數區分度差)
+            candidates = vs.similarity_search_with_score(query, k=10)
+            if not candidates:
+                return [TextContent(type="text", text="知識庫中未找到相關資料。")]
+            # 階段二:cross-encoder 精排(分數區分度大幅改善)
+            # 全部低於 RERANKER_THRESHOLD → 視為一般問答,不套用 SOP
+            docs_with_scores = rerank(query, candidates, top_k=k)
+            if not docs_with_scores:
                 return [TextContent(type="text", text="知識庫中未找到相關資料。")]
             # 回傳 JSON 格式，帶有 filename metadata 供 server_classifier 組 rag_chunks
             chunks = [
                 {
                     "filename": doc.metadata.get("source", f"chunk_{i+1}.md"),
                     "content":  doc.page_content,
+                    "score":    round(float(score), 3),
                 }
-                for i, doc in enumerate(docs)
+                for i, (doc, score) in enumerate(docs_with_scores)
             ]
+
             return [TextContent(type="text", text=json.dumps(chunks, ensure_ascii=False))]
         except Exception as e:
             return [TextContent(type="text", text=f"[RAG 查詢錯誤] {str(e)}")]

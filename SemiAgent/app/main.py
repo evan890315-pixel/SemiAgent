@@ -1,7 +1,13 @@
 """
-app/main.py - SemiAgent Streamlit 前端（多模態版）
-  💬 一般問答（對話模式，有記憶）
-  🔬 異常分析（完整流程，支援圖片 + 文字輸入）
+app/main.py - SemiAgent Streamlit 前端(v4.1 整合版)
+  💬 一般問答(Router + ReAct + Redis 記憶,含決策軌跡顯示)
+  🔬 異常分析(完整流程,支援圖片 + 文字輸入)
+  📄 知識庫管理
+
+v4.1 改動:
+  - sidebar 燈號改打 vLLM /v1/models 實測(原路徑檢查指向 v1 舊目錄)
+  - 問答 Tab:Enter 送出、每則回覆附 ReAct 決策軌跡、引擎標注、
+    needs_report 引導、demo 順序小抄
 """
 
 import sys
@@ -11,6 +17,7 @@ import time
 import tempfile
 from pathlib import Path
 
+import requests as _requests
 
 PROJECT_ROOT = Path(__file__).parents[1]
 os.chdir(PROJECT_ROOT)
@@ -25,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── CSS（沿用原版，補充圖片相關樣式）────────────────────────────
+# ─── CSS ─────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+TC:wght@300;400;500;700&display=swap');
@@ -63,15 +70,31 @@ html,body,[class*="css"]{font-family:'IBM Plex Sans TC',sans-serif!important;bac
 </style>
 """, unsafe_allow_html=True)
 
+
+# ─── vLLM 狀態實測(v4.1)──────────────────────────────────────────
+@st.cache_data(ttl=30)   # 30 秒快取,避免每次 rerun 都打
+def check_vllm_status():
+    """回傳 (server_ok, dpo_mounted)"""
+    try:
+        r = _requests.get("http://localhost:8000/v1/models", timeout=3)
+        if r.status_code != 200:
+            return False, False
+        model_ids = [m.get("id", "") for m in r.json().get("data", [])]
+        return True, "dpo" in model_ids
+    except Exception:
+        return False, False
+
+
 # ─── 預載 Agent ───────────────────────────────────────────────────
 @st.cache_resource
 def init_agents():
     import agent.tools.tools as _tools
-    from agent.graph.graph_chat import run_chat, get_chat_history
+    from agent.graph.chat_agent import run_chat, get_chat_history, record_turn
     from agent.graph.graph import run_analysis, get_analysis_history
     return {
         "run_chat":             run_chat,
         "get_chat_history":     get_chat_history,
+        "record_turn":          record_turn,
         "run_analysis":         run_analysis,
         "get_analysis_history": get_analysis_history,
     }
@@ -88,11 +111,9 @@ with st.sidebar:
         d   = f'<span style="margin-left:auto;font-size:.7rem;color:var(--text-muted)">{detail}</span>' if detail else ""
         return f'<div class="sys-badge {cls}"><span class="{dot}"></span>{label}{d}</div>'
 
-    clf_ready    = Path("models/classifier/final").exists()
-    dpo_ready    = Path("models/generator/dpo/final").exists()
-    sft_ready    = Path("models/generator/sft/final").exists()
+    # v4.1:改打 vLLM 實測,不再檢查 v1 舊路徑
+    vllm_ok, dpo_mounted = check_vllm_status()
     vision_ready = Path("models/wafer_classifier/best.pth").exists()
-    gen_label    = "DPO" if dpo_ready else ("SFT" if sft_ready else "—")
 
     try:
         import redis as _redis
@@ -103,13 +124,19 @@ with st.sidebar:
         redis_ok = False
 
     st.markdown(
-        sys_badge("分類模型",    clf_ready,              "SFT+LoRA") +
-        sys_badge("生成模型",    dpo_ready or sft_ready, gen_label) +
-        sys_badge("視覺模型",    vision_ready,           "ResNet18") +
-        sys_badge("Qdrant RAG",  True,                   "MCP") +
-        sys_badge("Redis 記憶",  redis_ok,               "6379"),
+        sys_badge("vLLM 引擎",   vllm_ok,      "port 8000") +
+        sys_badge("DPO Adapter", dpo_mounted,  "checkpoint-20") +
+        sys_badge("視覺模型",    vision_ready, "ResNet18") +
+        sys_badge("Qdrant RAG",  True,         "MCP") +
+        sys_badge("Redis 記憶",  redis_ok,     "6379"),
         unsafe_allow_html=True
     )
+    if not vllm_ok:
+        st.markdown(
+            '<div style="padding:8px 12px;margin-top:6px;border-radius:6px;'
+            'background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.4);'
+            'font-size:.75rem;color:#f85149">⚠️ vLLM 離線 — 目前為 Mock 模式,'
+            '回答品質受限</div>', unsafe_allow_html=True)
 
     st.markdown('<div style="margin:16px 0 8px"><p class="section-label">Engineer ID</p></div>', unsafe_allow_html=True)
     engineer_id = st.text_input(
@@ -124,7 +151,7 @@ with st.sidebar:
     st.markdown(
         '<div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);'
         'font-family:\'IBM Plex Mono\',monospace;font-size:.68rem;color:var(--text-muted)">'
-        'SemiAgent v3.0<br>多模態 + 雙模式 + Redis 記憶</div>',
+        'SemiAgent v4.1<br>ReAct Agent + 多模態 + Redis 記憶</div>',
         unsafe_allow_html=True
     )
 
@@ -133,8 +160,8 @@ st.markdown(
     '<div style="display:flex;align-items:baseline;gap:16px;padding-bottom:1rem;'
     'border-bottom:1px solid var(--border);margin-bottom:1.5rem">'
     '<span style="font-family:\'IBM Plex Mono\',monospace;font-size:1.6rem;font-weight:600;color:var(--cyan)">⬡ SemiAgent</span>'
-    '<span style="font-size:.8rem;color:var(--text-muted);letter-spacing:1px;text-transform:uppercase">半導體製程智慧異常分析系統 v3.0</span>'
-    '<span class="vision-badge">+ 多模態視覺</span>'
+    '<span style="font-size:.8rem;color:var(--text-muted);letter-spacing:1px;text-transform:uppercase">半導體製程智慧異常分析系統 v4.1</span>'
+    '<span class="vision-badge">+ ReAct Agent</span>'
     '</div>',
     unsafe_allow_html=True
 )
@@ -142,61 +169,205 @@ st.markdown(
 # ─── 主 Tab ───────────────────────────────────────────────────────
 tab_chat, tab_analysis, tab_kb = st.tabs(["💬 一般問答", "🔬 異常分析", "📄 知識庫管理"])
 
-# ══ Tab 1：一般問答（沿用原版）════════════════════════════════════
+# ══ Tab 1:一般問答(v4.2 ChatGPT 風格)═══════════════════════════
+CHAT_ANOMALY_ZH = {"particle": "粒子汙染", "scratch": "刮痕缺陷",
+                   "void": "空洞缺陷", "crack": "裂紋缺陷", "normal": "正常"}
+
+
+def _record_chat_result(result: dict):
+    """統一記錄一輪的軌跡 meta(engine 由軌跡內容推斷)"""
+    trace = result.get("react_trace", [])
+    joined = " ".join(trace)
+    if "Ollama" in joined or "一般對話" in joined:
+        engine = "ollama"
+    elif "備援" in joined:
+        engine = "rule"
+    else:
+        engine = "vllm"
+    st.session_state["chat_traces"].append({
+        "trace":        trace,
+        "needs_report": result.get("needs_report", False),
+        "engine":       engine,
+    })
+
+
+def _run_chat_image_analysis(text: str, image_file):
+    """聊天內上傳晶圓圖 → 走完整分析 graph → 報告回寫進對話流"""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+        tmp.write(image_file.getvalue())
+        tmp_path = tmp.name
+    try:
+        with st.spinner("🖼️ 晶圓影像分析中(ReAct Agent)..."):
+            result = agents["run_analysis"](
+                user_input=text or "請根據上傳的晶圓圖片分析缺陷類型,並提供根因分析報告。",
+                lot_id="CHAT",
+                thread_id=engineer_id,
+                image_path=tmp_path,
+            )
+        clf    = result.get("anomaly_classification", {})
+        a_type = clf.get("anomaly_type", "normal")
+        report = result.get("final_report", "")
+        wo_id  = result.get("work_order", {}).get("work_order", {}).get("work_order_id", "")
+
+        parts = [f"已完成晶圓影像分析,判定為**{CHAT_ANOMALY_ZH.get(a_type, a_type)}**。"]
+        if report:
+            parts.append(report)
+        if wo_id and wo_id not in ("", "WO-?", "ERR") \
+                and "create_workorder" in result.get("steps_completed", []):
+            parts.append(f"🏭 維修工單 **{wo_id}** 已建立。")
+        ai_text = "\n\n".join(parts)
+
+        user_text = f"🖼️ [上傳晶圓圖片:{image_file.name}]" + (f" {text}" if text else "")
+        agents["record_turn"](engineer_id, user_text, ai_text)   # 報告寫進對話記憶
+        st.session_state["chat_traces"].append({
+            "trace":        result.get("react_trace", []),
+            "needs_report": False,
+            "engine":       "analysis",
+        })
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
 with tab_chat:
-    st.markdown('<p class="section-label">對話模式（有 Redis 記憶）</p>', unsafe_allow_html=True)
-    col_chat, col_history = st.columns([2, 1], gap="large")
+    if "chat_traces" not in st.session_state:
+        st.session_state["chat_traces"] = []   # [{trace, needs_report, engine}]
+
+    col_chat, col_side = st.columns([2, 1], gap="large")
 
     with col_chat:
-        chat_container = st.container()
-        history = agents["get_chat_history"](engineer_id)
-        with chat_container:
-            if not history:
-                st.markdown(
-                    '<div class="idle-panel">'
-                    '<div style="font-size:2rem;opacity:.3">💬</div>'
-                    '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:.8rem;margin-top:12px">開始對話</div>'
-                    '</div>', unsafe_allow_html=True
-                )
-            else:
-                for msg in history:
-                    if msg["role"] == "user":
-                        st.markdown(f'<div class="chat-bubble-user">👷 {msg["content"]}</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<div class="chat-bubble-ai">🤖 {msg["content"]}</div>', unsafe_allow_html=True)
-
-        st.markdown("<div style='margin-top:12px'></div>", unsafe_allow_html=True)
-        chat_input = st.text_input("輸入問題", placeholder="例如：粒子汙染的標準處理流程是什麼？",
-                                   label_visibility="collapsed", key="chat_input")
-        col_send, col_clear = st.columns([3, 1])
-        with col_send:
-            send_btn = st.button("發送 →", use_container_width=True, key="chat_send")
-        with col_clear:
-            if st.button("清除記憶", use_container_width=True, key="chat_clear"):
+        # 頂部工具列:標題 + 清除記憶
+        c_title, c_clear = st.columns([4, 1])
+        with c_title:
+            st.markdown('<p class="section-label">SemiAgent 對話'
+                        '(Router + ReAct + Redis 記憶)</p>',
+                        unsafe_allow_html=True)
+        with c_clear:
+            if st.button("🗑 清除記憶", key="chat_clear", use_container_width=True):
                 try:
                     import redis as _redis
-                    r = _redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
-                    for key in r.scan_iter(f"*chat_{engineer_id}*"):
-                        r.delete(key)
-                    st.success("記憶已清除")
+                    _r2 = _redis.from_url(os.getenv("REDIS_URL",
+                                                    "redis://localhost:6379"))
+                    deleted = 0
+                    for key in _r2.scan_iter(f"*chat_{engineer_id}*"):
+                        _r2.delete(key)
+                        deleted += 1
+                    st.session_state["chat_traces"] = []
+                    st.toast(f"記憶已清除({deleted} 筆)", icon="🗑")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"清除失敗：{e}")
+                    st.error(f"清除失敗:{e}")
 
-        if send_btn and chat_input.strip():
-            with st.spinner("思考中..."):
-                agents["run_chat"](chat_input, thread_id=engineer_id)
-            st.rerun()
+        history = agents["get_chat_history"](engineer_id)
 
-    with col_history:
-        st.markdown('<p class="section-label">快速提問</p>', unsafe_allow_html=True)
-        for q in ["粒子汙染有哪些根因？","CMP 壓力偏高如何處理？","void 缺陷的預防措施？","裂紋缺陷的緊急處理？"]:
-            if st.button(q, use_container_width=True, key=f"quick_{q}"):
-                with st.spinner("查詢中..."):
-                    agents["run_chat"](q, thread_id=engineer_id)
+        # ── 對話流:st.chat_message 原生 ChatGPT 風格氣泡 ──
+        chat_box = st.container(height=460)
+        with chat_box:
+            if not history:
+                st.markdown(
+                    '<div class="idle-panel" style="margin-top:80px">'
+                    '<div style="font-size:2rem;opacity:.3">⬡</div>'
+                    '<div style="font-family:\'IBM Plex Mono\',monospace;'
+                    'font-size:.8rem;margin-top:12px">開始對話</div>'
+                    '<div style="font-size:.72rem;margin-top:8px;color:var(--text-muted)">'
+                    '詢問 SOP 與製程知識,或按 📎 上傳晶圓圖片直接分析</div>'
+                    '</div>', unsafe_allow_html=True)
+            else:
+                ai_total = sum(1 for m in history if m["role"] != "user")
+                ai_idx = 0
+                for msg in history:
+                    if msg["role"] == "user":
+                        with st.chat_message("user", avatar="👷"):
+                            st.markdown(msg["content"])
+                    else:
+                        with st.chat_message("assistant", avatar="🤖"):
+                            st.markdown(msg["content"])
+                            ai_idx += 1
+                            # trace 只掛最後一則(避免舊 session 歷史錯位)
+                            if ai_idx == ai_total and st.session_state["chat_traces"]:
+                                meta = st.session_state["chat_traces"][-1]
+                                tag = {"vllm": "⚡ vLLM(dpo)",
+                                       "ollama": "💬 Ollama",
+                                       "analysis": "🔬 分析 Agent",
+                                       "rule": "🔧 規則備援"}.get(
+                                           meta.get("engine"), "")
+                                with st.expander(
+                                        f"🧠 決策軌跡({len(meta['trace'])} 步)"
+                                        f"|{tag}", expanded=False):
+                                    for step in meta["trace"]:
+                                        st.markdown(
+                                            f'<div style="font-family:\'IBM Plex '
+                                            f'Mono\',monospace;font-size:.76rem;'
+                                            f'padding:6px 10px;margin:3px 0;'
+                                            f'background:var(--bg-raised);'
+                                            f'border-left:2px solid var(--cyan);'
+                                            f'border-radius:0 4px 4px 0;'
+                                            f'white-space:pre-wrap">{step}</div>',
+                                            unsafe_allow_html=True)
+                                if meta.get("needs_report"):
+                                    st.warning("💡 偵測到具體異常資料 — 可直接"
+                                               "按 📎 附上晶圓圖,或切換"
+                                               "「🔬 異常分析」分頁", icon="⚠️")
+
+        # ── 輸入列:chat_input 內建 📎 附檔(需 streamlit >= 1.43)──
+        _ver = tuple(int(x) for x in st.__version__.split(".")[:2])
+        if _ver >= (1, 43):
+            user_msg = st.chat_input(
+                "詢問製程知識,或按 📎 上傳晶圓圖片直接分析...",
+                accept_file=True,
+                file_type=["png", "jpg", "jpeg"],
+            )
+            if user_msg:
+                text  = (user_msg.text or "").strip()
+                files = user_msg.files or []
+                if files:
+                    _run_chat_image_analysis(text, files[0])
+                    st.rerun()
+                elif text:
+                    with st.spinner("Agent 思考中..."):
+                        result = agents["run_chat"](text, thread_id=engineer_id)
+                    _record_chat_result(result)
+                    st.rerun()
+        else:
+            st.info("💡 升級 Streamlit 可啟用聊天內附圖:pip install -U streamlit")
+            user_text = st.chat_input("詢問製程知識...")
+            if user_text and user_text.strip():
+                with st.spinner("Agent 思考中..."):
+                    result = agents["run_chat"](user_text.strip(),
+                                                thread_id=engineer_id)
+                _record_chat_result(result)
                 st.rerun()
 
-# ══ Tab 2：異常分析（多模態版）════════════════════════════════════
+    with col_side:
+        st.markdown('<p class="section-label">快速提問</p>', unsafe_allow_html=True)
+        QUICK_QS = [
+            "粒子汙染有哪些根因?",
+            "CMP 壓力偏高如何處理?",
+            "void 缺陷的預防措施?",
+            "系統支援哪些異常類別?",
+        ]
+        for q in QUICK_QS:
+            if st.button(q, use_container_width=True, key=f"quick_{q}"):
+                with st.spinner("查詢中..."):
+                    result = agents["run_chat"](q, thread_id=engineer_id)
+                _record_chat_result(result)
+                st.rerun()
+
+        # demo 順序小抄(不需要時整段刪除)
+        st.markdown(
+            '<div style="margin-top:20px;padding:12px 14px;border-radius:6px;'
+            'background:var(--bg-raised);border:1px solid var(--border);'
+            'font-size:.74rem;color:var(--text-secondary);line-height:1.8">'
+            '<b style="color:var(--text-primary)">Demo 順序建議</b><br>'
+            '① 知識查詢(RAG 路徑)<br>'
+            '② 帶異常數據的描述(needs_report 引導)<br>'
+            '③ 切到分析分頁跑完整 ReAct<br>'
+            '④ 回來追問工單號(記憶跟進)'
+            '</div>', unsafe_allow_html=True)
+
+# ══ Tab 2:異常分析(原樣保留)═══════════════════════════════════
 ANOMALY_META = {
     "particle": ("粒子汙染", "#bc8cff"),
     "scratch":  ("刮痕缺陷", "#d29922"),
@@ -206,10 +377,10 @@ ANOMALY_META = {
 }
 
 EXAMPLES = {
-    "粒子汙染": "晶圓表面發現大量粒子分布，粒子計數 320 個，高於規格上限 100 個。製程溫度 400°C，壓力 2.0 Torr，良率下降至 65%。",
-    "刮痕缺陷": "CMP 後檢測發現晶圓邊緣存在線狀刮痕，長度約 3mm，製程壓力讀值 2.7 Torr 偏高，良率 72%。",
-    "空洞缺陷": "X-ray 檢測發現金屬填洞失敗，存在 void 缺陷，CVD 氣體流量 75 sccm 低於規格 90 sccm，良率 58%。",
-    "裂紋缺陷": "急熱製程後晶圓邊緣出現裂紋，製程溫度急升至 435°C，超出規格上限 405°C，良率下降至 50%。",
+    "粒子汙染": "晶圓表面發現大量粒子分布,粒子計數 320 個,高於規格上限 100 個。製程溫度 400°C,壓力 2.0 Torr,良率下降至 65%。",
+    "刮痕缺陷": "CMP 後檢測發現晶圓邊緣存在線狀刮痕,長度約 3mm,製程壓力讀值 2.7 Torr 偏高,良率 72%。",
+    "空洞缺陷": "X-ray 檢測發現金屬填洞失敗,存在 void 缺陷,CVD 氣體流量 75 sccm 低於規格 90 sccm,良率 58%。",
+    "裂紋缺陷": "急熱製程後晶圓邊緣出現裂紋,製程溫度急升至 435°C,超出規格上限 405°C,良率下降至 50%。",
 }
 
 with tab_analysis:
@@ -218,9 +389,8 @@ with tab_analysis:
     with col_left:
         st.markdown('<p class="section-label">輸入模式</p>', unsafe_allow_html=True)
 
-        lot_id_input = st.text_input("批次編號（選填）", value="LOT0001")
+        lot_id_input = st.text_input("批次編號(選填)", value="LOT0001")
 
-        # ── 輸入模式切換 ──────────────────────────────────────────
         input_mode = st.radio(
             "輸入模式",
             options=["📝 文字描述", "🖼️ 晶圓圖片", "📝 + 🖼️ 圖片 + 文字"],
@@ -228,7 +398,6 @@ with tab_analysis:
             label_visibility="collapsed",
         )
 
-        # ── 圖片上傳（如果需要）──────────────────────────────────
         uploaded_file = None
         saved_image_path = None
 
@@ -238,18 +407,15 @@ with tab_analysis:
                 "上傳晶圓圖片",
                 type=["jpg", "jpeg", "png"],
                 label_visibility="collapsed",
-                help="支援 JPG / PNG，WM-811K 格式（紅/綠/藍顏色編碼）"
+                help="支援 JPG / PNG,WM-811K 格式(紅/綠/藍顏色編碼)"
             )
             if uploaded_file is not None:
-                # 顯示預覽
                 st.image(uploaded_file, caption="上傳的晶圓圖片", width=200)
-                # 存到臨時檔案
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                     tmp.write(uploaded_file.getvalue())
                     saved_image_path = tmp.name
-                st.caption(f"✅ 圖片已載入：{uploaded_file.name}")
+                st.caption(f"✅ 圖片已載入:{uploaded_file.name}")
 
-        # ── 文字輸入（如果需要）──────────────────────────────────
         user_input = ""
         if "文字" in input_mode:
             st.markdown('<p class="section-label" style="margin-top:12px">異常描述</p>', unsafe_allow_html=True)
@@ -266,18 +432,15 @@ with tab_analysis:
                 label_visibility="collapsed",
             )
         elif saved_image_path:
-            # 純圖片模式：自動生成描述文字
-            user_input = "請根據上傳的晶圓圖片分析缺陷類型，並提供根因分析報告。"
+            user_input = "請根據上傳的晶圓圖片分析缺陷類型,並提供根因分析報告。"
 
-        # ── 模式說明 ──────────────────────────────────────────────
         if input_mode == "🖼️ 晶圓圖片":
-            st.info("📌 圖片模式：ResNet18 分析晶圓圖 → 自動判斷缺陷類型 → 生成報告")
+            st.info("📌 圖片模式:ResNet18 分析晶圓圖 → 自動判斷缺陷類型 → 生成報告")
         elif input_mode == "📝 + 🖼️ 圖片 + 文字":
-            st.info("📌 多模態模式：視覺分類 + 文字描述雙重輸入，提升分析準確性")
+            st.info("📌 多模態模式:視覺分類 + 文字描述雙重輸入,提升分析準確性")
 
         run_btn = st.button("執行異常分析 →", use_container_width=True)
 
-        # 歷史記錄
         history = agents["get_analysis_history"](engineer_id)
         if history:
             st.markdown('<div style="margin-top:16px"><p class="section-label">歷史分析記錄</p></div>', unsafe_allow_html=True)
@@ -298,7 +461,6 @@ with tab_analysis:
         st.markdown('<p class="section-label">分析結果</p>', unsafe_allow_html=True)
 
         if run_btn:
-            # 驗證輸入
             has_image = saved_image_path is not None
             has_text  = bool(user_input.strip())
 
@@ -307,35 +469,43 @@ with tab_analysis:
             else:
                 mode_label = (
                     "視覺分析模式" if has_image and not has_text else
-                    "多模態模式（圖片 + 文字）" if has_image and has_text else
+                    "多模態模式(圖片 + 文字)" if has_image and has_text else
                     "文字分析模式"
                 )
-                with st.spinner(f"Agent 分析中（{mode_label}）..."):
+                with st.spinner(f"Agent 分析中({mode_label})..."):
                     try:
                         t0     = time.time()
                         result = agents["run_analysis"](
                             user_input  = user_input or "請分析上傳的晶圓圖片",
                             lot_id      = lot_id_input or "UNKNOWN",
                             thread_id   = engineer_id,
-                            image_path  = saved_image_path,   # 傳入圖片路徑
+                            image_path  = saved_image_path,
                         )
                         elapsed = time.time() - t0
 
                         clf          = result.get("anomaly_classification", {})
                         anomaly_type = clf.get("anomaly_type", "normal")
                         anomaly_name, anomaly_color = ANOMALY_META.get(anomaly_type, ("未知", "#7d8590"))
-                        steps_done   = len([s for s in result.get("steps_completed", []) if "failed" not in s])
                         final_report = result.get("final_report", "報告生成失敗")
                         work_order   = result.get("work_order", {})
                         notification = result.get("notification", {})
 
-                        # 指標
+                        react_trace = result.get("react_trace", [])
+                        iters       = result.get("iterations", 0)
+                        steps       = result.get("steps_completed", [])
+
+                        # 分類信心:有視覺分數時顯示最高類別的百分比
+                        v_scores = clf.get("vision_scores") or {}
+                        if v_scores:
+                            conf_display = f"{max(float(v) for v in v_scores.values()):.1%}"
+                        else:
+                            conf_display = clf.get("confidence", "—")
+
                         c1, c2, c3 = st.columns(3)
                         c1.markdown(f'<div class="metric-card"><div class="metric-val">{elapsed:.1f}s</div><div class="metric-lbl">分析耗時</div></div>', unsafe_allow_html=True)
-                        c2.markdown(f'<div class="metric-card"><div class="metric-val">{steps_done}/5</div><div class="metric-lbl">完成步驟</div></div>', unsafe_allow_html=True)
-                        c3.markdown(f'<div class="metric-card"><div class="metric-val" style="font-size:.9rem">{clf.get("confidence","—")}</div><div class="metric-lbl">分類信心</div></div>', unsafe_allow_html=True)
+                        c2.markdown(f'<div class="metric-card"><div class="metric-val">{iters}</div><div class="metric-lbl">ReAct 迭代</div></div>', unsafe_allow_html=True)
+                        c3.markdown(f'<div class="metric-card"><div class="metric-val" style="font-size:.9rem">{conf_display}</div><div class="metric-lbl">分類信心</div></div>', unsafe_allow_html=True)
 
-                        # 異常類型 + 模式標籤
                         vision_tag = '<span style="font-size:.7rem;background:rgba(188,140,255,.15);color:#bc8cff;padding:2px 7px;border-radius:4px;margin-left:8px">視覺模型</span>' if has_image else ""
                         st.markdown(
                             f'<div style="display:flex;align-items:center;gap:12px;padding:14px 16px;'
@@ -349,24 +519,41 @@ with tab_analysis:
                             unsafe_allow_html=True
                         )
 
-                        # 視覺信心分布（如果有圖片）
                         if has_image and clf.get("vision_scores"):
                             with st.expander("📊 視覺模型各類別信心值"):
                                 for cls, score in clf["vision_scores"].items():
                                     name = ANOMALY_META.get(cls, (cls, ""))[0]
-                                    st.progress(float(score), text=f"{name}（{cls}）：{score:.1%}")
+                                    st.progress(float(score), text=f"{name}({cls}):{score:.1%}")
 
-                        # ERP + 郵件
-                        if work_order or notification:
-                            col_erp, col_email = st.columns(2)
-                            with col_erp:
+                        # 三態顯示:agent 沒選該動作 ≠ 失敗
+                        col_erp, col_email = st.columns(2)
+                        with col_erp:
+                            if "create_workorder" not in steps:
+                                st.caption("🏭 工單:未執行(agent 判定不需要)")
+                            elif work_order.get("success"):
                                 wo_id = work_order.get("work_order", {}).get("work_order_id", "—")
-                                st.success(f"🏭 工單：{wo_id}" if work_order.get("success") else "⚠️ 工單建立失敗")
-                            with col_email:
-                                n_count = notification.get("recipient_count", 0)
-                                st.success(f"📧 通報：{n_count} 人" if notification.get("success") else "⚠️ 通報失敗")
+                                st.success(f"🏭 工單:{wo_id}")
+                            else:
+                                st.error("⚠️ 工單建立失敗")
+                        with col_email:
+                            if "send_email" not in steps:
+                                st.caption("📧 通報:未執行(agent 判定不需要)")
+                            elif notification.get("success"):
+                                st.success(f"📧 通報:{notification.get('recipient_count', 0)} 人")
+                            else:
+                                st.error("⚠️ 通報失敗")
 
-                        # 報告
+                        if react_trace:
+                            with st.expander(f"ReAct 決策軌跡({len(react_trace)} 步)"):
+                                for step in react_trace:
+                                    st.markdown(
+                                        f'<div style="font-family:\'IBM Plex Mono\',monospace;'
+                                        f'font-size:.78rem;padding:6px 10px;margin:3px 0;'
+                                        f'background:var(--bg-raised);border-left:2px solid var(--cyan);'
+                                        f'border-radius:0 4px 4px 0;white-space:pre-wrap">{step}</div>',
+                                        unsafe_allow_html=True
+                                    )
+
                         st.markdown('<p class="section-label" style="margin-top:12px">根因分析報告</p>', unsafe_allow_html=True)
                         st.markdown(f'<div class="report-card">{final_report}</div>', unsafe_allow_html=True)
 
@@ -378,7 +565,6 @@ with tab_analysis:
                             use_container_width=True,
                         )
 
-                        # 清理臨時圖片
                         if saved_image_path and Path(saved_image_path).exists():
                             try:
                                 os.unlink(saved_image_path)
@@ -386,7 +572,7 @@ with tab_analysis:
                                 pass
 
                     except Exception as e:
-                        st.error(f"分析錯誤：{str(e)}")
+                        st.error(f"分析錯誤:{str(e)}")
                         with st.expander("詳細錯誤"):
                             st.code(str(e))
         else:
@@ -399,11 +585,11 @@ with tab_analysis:
                 unsafe_allow_html=True
             )
 
-# ══ Tab 3：知識庫管理 ══════════════════════════════════════════════
+# ══ Tab 3:知識庫管理(原樣保留)═════════════════════════════════
 from mcp_server.mcp_client import call_mcp_tool
 
 with tab_kb:
-    st.markdown('<p class="section-label">知識庫管理（PDF / 圖片 → RAG）</p>',
+    st.markdown('<p class="section-label">知識庫管理(PDF / 圖片 → RAG)</p>',
                 unsafe_allow_html=True)
 
     col_upload, col_list = st.columns([1, 1], gap="large")
@@ -422,12 +608,12 @@ with tab_kb:
             if ext in [".jpg", ".jpeg", ".png"]:
                 st.image(uploaded, caption=uploaded.name, width=250)
             else:
-                st.info(f"📄 {uploaded.name}（{uploaded.size // 1024} KB）")
+                st.info(f"📄 {uploaded.name}({uploaded.size // 1024} KB)")
 
             use_vision = False
             if ext in [".jpg", ".jpeg", ".png"]:
                 use_vision = st.checkbox(
-                    "使用 Gemini Vision 描述圖片（適合電路圖）",
+                    "使用 Gemini Vision 描述圖片(適合電路圖)",
                     value=False,
                 )
 
@@ -439,7 +625,7 @@ with tab_kb:
                     tmp.write(uploaded.getvalue())
                     tmp_path = tmp.name
 
-                with st.spinner(f"解析中：{uploaded.name}..."):
+                with st.spinner(f"解析中:{uploaded.name}..."):
                     try:
                         result_str = call_mcp_tool(
                             "server_rag", "add_document",
@@ -447,11 +633,11 @@ with tab_kb:
                         )
                         result = json.loads(result_str)
                         if result.get("success"):
-                            st.success(f"✅ 加入成功，共 {result['chunks_added']} 個 chunk")
+                            st.success(f"✅ 加入成功,共 {result['chunks_added']} 個 chunk")
                         else:
-                            st.error(f"❌ 失敗：{result.get('error')}")
+                            st.error(f"❌ 失敗:{result.get('error')}")
                     except Exception as e:
-                        st.error(f"❌ 錯誤：{e}")
+                        st.error(f"❌ 錯誤:{e}")
                     finally:
                         try:
                             os.unlink(tmp_path)
@@ -475,7 +661,7 @@ with tab_kb:
         kb_data = st.session_state.get("kb_docs", {})
 
         if "error" in kb_data:
-            st.error(f"無法取得文件列表：{kb_data['error']}")
+            st.error(f"無法取得文件列表:{kb_data['error']}")
         else:
             c1, c2 = st.columns(2)
             c1.markdown(
@@ -520,9 +706,9 @@ with tab_kb:
                             try:
                                 call_mcp_tool("server_rag", "delete_document",
                                               {"source": source})
-                                st.success(f"已刪除：{source}")
+                                st.success(f"已刪除:{source}")
                                 if "kb_docs" in st.session_state:
                                     del st.session_state["kb_docs"]
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"刪除失敗：{e}")
+                                st.error(f"刪除失敗:{e}")
