@@ -1,4 +1,4 @@
-# Core
+# ── Core ML / Fine-tuning ────────────────────────────────────
 torch>=2.2.0
 torchvision>=0.17.0
 transformers>=4.40.0
@@ -8,27 +8,43 @@ datasets>=2.18.0
 accelerate>=0.28.0
 bitsandbytes>=0.43.0
 
-# LangChain / Agent
+# ── Agent 框架（LangGraph / LangChain）─────────────────────────
 langchain>=0.2.0
+langchain-core>=0.2.0
 langchain-community>=0.2.0
 langgraph>=0.1.0
+langgraph-checkpoint-redis>=0.1.0
 langchain-huggingface>=0.0.3
 
-# RAG（Qdrant 取代原本的 FAISS）
+# ── RAG（Qdrant 向量庫 + bi-encoder + cross-encoder reranker）───
 qdrant-client>=1.9.0
 langchain-qdrant>=0.1.0
 sentence-transformers>=2.7.0
 
-# Data
+# ── 對話記憶 / 短路快取 ──────────────────────────────────────────
+redis>=5.0.0
+
+# ── MCP Server（工具協議層）──────────────────────────────────────
+mcp>=1.0.0
+
+# ── 文件解析（PDF / OCR，知識庫匯入用）───────────────────────────
+pymupdf>=1.24.0
+easyocr>=1.7.1
+opencv-python>=4.9.0
+pillow>=10.2.0
+
+# ── Data ─────────────────────────────────────────────────────
 pandas>=2.2.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
+matplotlib>=3.8.0
 
-# App
-streamlit>=1.33.0
-plotly>=5.20.0
+# ── App ──────────────────────────────────────────────────────
+streamlit>=1.43.0
+requests>=2.31.0
 
-# Utils
+# ── Utils ────────────────────────────────────────────────────
 python-dotenv>=1.0.0
+huggingface_hub>=0.22.0
 tqdm>=4.66.0
 pyyaml>=6.0.1
